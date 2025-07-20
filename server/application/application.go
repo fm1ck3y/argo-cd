@@ -525,7 +525,7 @@ func (s *Server) GetManifests(ctx context.Context, q *application.ApplicationMan
 		}
 
 		// Store the map of all sources having ref field into a map for applications with sources field
-		refSources, err := argo.GetRefSources(context.Background(), sources, appSpec.Project, s.db.GetRepository, []string{}, false)
+		refSources, err := argo.GetRefSources(context.Background(), sources, appSpec.Project, s.db.GetRepository, []string{})
 		if err != nil {
 			return fmt.Errorf("failed to get ref sources: %w", err)
 		}
@@ -541,10 +541,6 @@ func (s *Server) GetManifests(ctx context.Context, q *application.ApplicationMan
 				return fmt.Errorf("error getting kustomize settings: %w", err)
 			}
 
-			kustomizeOptions, err := kustomizeSettings.GetOptions(source)
-			if err != nil {
-				return fmt.Errorf("error getting kustomize settings options: %w", err)
-			}
 			installationID, err := s.settingsMgr.GetInstallationID()
 			if err != nil {
 				return fmt.Errorf("error getting installation ID: %w", err)
@@ -574,7 +570,7 @@ func (s *Server) GetManifests(ctx context.Context, q *application.ApplicationMan
 				Namespace:                       a.Spec.Destination.Namespace,
 				ApplicationSource:               &source,
 				Repos:                           repos,
-				KustomizeOptions:                kustomizeOptions,
+				KustomizeOptions:                kustomizeSettings,
 				KubeVersion:                     serverVersion,
 				ApiVersions:                     argo.APIResourcesToStrings(apiResources, true),
 				HelmRepoCreds:                   helmRepoCreds,
@@ -686,10 +682,6 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 		if err != nil {
 			return fmt.Errorf("error getting kustomize settings: %w", err)
 		}
-		kustomizeOptions, err := kustomizeSettings.GetOptions(a.Spec.GetSource())
-		if err != nil {
-			return fmt.Errorf("error getting kustomize settings options: %w", err)
-		}
 
 		req := &apiclient.ManifestRequest{
 			Repo:                            repo,
@@ -699,7 +691,7 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 			Namespace:                       a.Spec.Destination.Namespace,
 			ApplicationSource:               &source,
 			Repos:                           helmRepos,
-			KustomizeOptions:                kustomizeOptions,
+			KustomizeOptions:                kustomizeSettings,
 			KubeVersion:                     serverVersion,
 			ApiVersions:                     argo.APIResourcesToStrings(apiResources, true),
 			HelmRepoCreds:                   helmCreds,
@@ -825,15 +817,11 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 			if err != nil {
 				return fmt.Errorf("error getting trackingMethod from settings: %w", err)
 			}
-			kustomizeOptions, err := kustomizeSettings.GetOptions(a.Spec.GetSource())
-			if err != nil {
-				return fmt.Errorf("error getting kustomize settings options: %w", err)
-			}
 			_, err = client.GetAppDetails(ctx, &apiclient.RepoServerAppDetailsQuery{
 				Repo:               repo,
 				Source:             &source,
 				AppName:            appName,
-				KustomizeOptions:   kustomizeOptions,
+				KustomizeOptions:   kustomizeSettings,
 				Repos:              helmRepos,
 				NoCache:            true,
 				TrackingMethod:     trackingMethod,
@@ -1067,7 +1055,8 @@ func (s *Server) Patch(ctx context.Context, q *application.ApplicationPatchReque
 		return nil, err
 	}
 
-	if err = s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionUpdate, app.RBACName(s.ns)); err != nil {
+	err = s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionUpdate, app.RBACName(s.ns))
+	if err != nil {
 		return nil, err
 	}
 
@@ -1296,7 +1285,7 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	if app.Spec.HasMultipleSources() {
 		sourceNames := make(map[string]bool)
 		for _, source := range app.Spec.Sources {
-			if len(source.Name) > 0 && sourceNames[source.Name] {
+			if source.Name != "" && sourceNames[source.Name] {
 				return fmt.Errorf("application %s has duplicate source name: %s", app.Name, source.Name)
 			}
 			sourceNames[source.Name] = true
@@ -2455,7 +2444,8 @@ func (s *Server) getUnstructuredLiveResourceOrApp(ctx context.Context, rbacReque
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		if err = s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbacRequest, app.RBACName(s.ns)); err != nil {
+		err = s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbacRequest, app.RBACName(s.ns))
+		if err != nil {
 			return nil, nil, nil, nil, err
 		}
 		config, err = s.getApplicationClusterConfig(ctx, app)
@@ -2495,7 +2485,32 @@ func (s *Server) getAvailableActions(resourceOverrides map[string]v1alpha1.Resou
 	return availableActions, nil
 }
 
+// RunResourceAction runs a resource action on a live resource
+//
+// Deprecated: use RunResourceActionV2 instead. This version does not support resource action parameters but is
+// maintained for backward compatibility. It will be removed in a future release.
 func (s *Server) RunResourceAction(ctx context.Context, q *application.ResourceActionRunRequest) (*application.ApplicationResponse, error) {
+	log.WithFields(log.Fields{
+		"action":        q.Action,
+		"application":   q.Name,
+		"app-namespace": q.AppNamespace,
+		"project":       q.Project,
+		"user":          session.Username(ctx),
+	}).Warn("RunResourceAction was called. RunResourceAction is deprecated and will be removed in a future release. Use RunResourceActionV2 instead.")
+	qV2 := &application.ResourceActionRunRequestV2{
+		Name:         q.Name,
+		AppNamespace: q.AppNamespace,
+		Namespace:    q.Namespace,
+		ResourceName: q.ResourceName,
+		Kind:         q.Kind,
+		Version:      q.Version,
+		Group:        q.Group,
+		Project:      q.Project,
+	}
+	return s.RunResourceActionV2(ctx, qV2)
+}
+
+func (s *Server) RunResourceActionV2(ctx context.Context, q *application.ResourceActionRunRequestV2) (*application.ApplicationResponse, error) {
 	resourceRequest := &application.ApplicationResourceRequest{
 		Name:         q.Name,
 		AppNamespace: q.AppNamespace,

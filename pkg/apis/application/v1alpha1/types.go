@@ -1241,15 +1241,15 @@ func (status *ApplicationStatus) GetRevisions() []string {
 
 // BuildComparedToStatus will build a ComparedTo object based on the current
 // Application state.
-func (spec *ApplicationSpec) BuildComparedToStatus() ComparedTo {
+func (spec *ApplicationSpec) BuildComparedToStatus(sources []ApplicationSource) ComparedTo {
 	ct := ComparedTo{
 		Destination:       spec.Destination,
 		IgnoreDifferences: spec.IgnoreDifferences,
 	}
 	if spec.HasMultipleSources() {
-		ct.Sources = spec.Sources
+		ct.Sources = sources
 	} else {
-		ct.Source = spec.GetSource()
+		ct.Source = sources[0]
 	}
 	return ct
 }
@@ -2821,7 +2821,7 @@ func (w *SyncWindow) scheduleOffsetByTimeZone() time.Duration {
 
 // AddWindow adds a sync window with the given parameters to the AppProject
 func (spec *AppProjectSpec) AddWindow(knd string, sch string, dur string, app []string, ns []string, cl []string, ms bool, timeZone string, andOperator bool, description string) error {
-	if len(knd) == 0 || len(sch) == 0 || len(dur) == 0 {
+	if knd == "" || sch == "" || dur == "" {
 		return errors.New("cannot create window: require kind, schedule, duration and one or more of applications, namespaces and clusters")
 	}
 
@@ -3064,15 +3064,15 @@ func (w SyncWindow) active(currentTime time.Time) (bool, error) {
 
 // Update updates a sync window's settings with the given parameter
 func (w *SyncWindow) Update(s string, d string, a []string, n []string, c []string, tz string, description string) error {
-	if len(s) == 0 && len(d) == 0 && len(a) == 0 && len(n) == 0 && len(c) == 0 && len(description) == 0 {
+	if s == "" && d == "" && len(a) == 0 && len(n) == 0 && len(c) == 0 && description == "" {
 		return errors.New("cannot update: require one or more of schedule, duration, application, namespace, cluster or description")
 	}
 
-	if len(s) > 0 {
+	if s != "" {
 		w.Schedule = s
 	}
 
-	if len(d) > 0 {
+	if d != "" {
 		w.Duration = d
 	}
 
@@ -3088,7 +3088,7 @@ func (w *SyncWindow) Update(s string, d string, a []string, n []string, c []stri
 		w.Clusters = c
 	}
 
-	if len(description) > 0 {
+	if description != "" {
 		w.Description = description
 	}
 
@@ -3181,12 +3181,30 @@ type HelmOptions struct {
 	ValuesFileSchemes []string `protobuf:"bytes,1,opt,name=valuesFileSchemes"`
 }
 
+// KustomizeVersion holds information about additional Kustomize versions
+type KustomizeVersion struct {
+	// Name holds Kustomize version name
+	Name string `protobuf:"bytes,1,opt,name=name"`
+	// Path holds the corresponding binary path
+	Path string `protobuf:"bytes,2,opt,name=path"`
+	// BuildOptions that are specific to a Kustomize version
+	BuildOptions string `protobuf:"bytes,3,opt,name=buildOptions"`
+}
+
 // KustomizeOptions are options for kustomize to use when building manifests
 type KustomizeOptions struct {
 	// BuildOptions is a string of build parameters to use when calling `kustomize build`
 	BuildOptions string `protobuf:"bytes,1,opt,name=buildOptions"`
+
 	// BinaryPath holds optional path to kustomize binary
+	//
+	// Deprecated: Use settings.Settings instead. See: settings.Settings.KustomizeVersions.
+	// If this field is set, it will be used as the Kustomize binary path.
+	// Otherwise, Versions is used.
 	BinaryPath string `protobuf:"bytes,2,opt,name=binaryPath"`
+
+	// Versions is a list of Kustomize versions and their corresponding binary paths and build options.
+	Versions []KustomizeVersion `protobuf:"bytes,3,rep,name=versions"`
 }
 
 // ApplicationDestinationServiceAccount holds information about the service account to be impersonated for the application sync operation.
@@ -3357,7 +3375,7 @@ func findConditionIndexByType(conditions []ApplicationCondition, t ApplicationCo
 	return -1
 }
 
-// GetErrorConditions returns list of application error conditions
+// GetConditions returns list of application error conditions
 func (status *ApplicationStatus) GetConditions(conditionTypes map[ApplicationConditionType]bool) []ApplicationCondition {
 	result := make([]ApplicationCondition, 0)
 	for i := range status.Conditions {
