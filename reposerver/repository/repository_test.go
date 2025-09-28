@@ -3000,13 +3000,13 @@ func Test_getHelmDependencyRepos(t *testing.T) {
 }
 
 func Test_isRunBuildRequired_Wildcards(t *testing.T) {
-	buildRequired, err := getHelmDependencyRepos("../../util/helm/testdata/wildcard-dependency")
+	buildRequired, err := isRunBuildRequired("../../util/helm/testdata/wildcard-dependency")
 	require.NoError(t, err)
 	assert.Equal(t, true, buildRequired)
 }
 
 func Test_isRunBuildRequired_StrictVersion(t *testing.T) {
-	buildRequired, err := getHelmDependencyRepos("../../util/helm/testdata/dependency")
+	buildRequired, err := isRunBuildRequired("../../util/helm/testdata/dependency")
 	require.NoError(t, err)
 	assert.Equal(t, false, buildRequired)
 }

@@ -1103,10 +1103,10 @@ type repositories struct {
 }
 
 func isRunBuildRequired(appPath string) (bool, error) {
-	// if in Chart.yaml we have wildcard dependencies & we execute `helm template`
-	// without `helm dependency build` it is not correct behavior, because
-	// because in the <appPath>/charts folder helm package can store dependencies with the old version,
-	// but there is already a newer version in the registry
+	// If Chart.yaml contains wildcard dependencies and we run `helm template`
+	// without first executing `helm dependency build`, the behavior may be incorrect.
+	// This is because the <appPath>/charts folder may still contain dependencies
+	// with outdated versions, while newer versions are already available in the registry.
 
 	f, err := os.ReadFile(filepath.Join(appPath, "Chart.yaml"))
 	if err != nil {
