@@ -2999,6 +2999,18 @@ func Test_getHelmDependencyRepos(t *testing.T) {
 	assert.Equal(t, repos[1].Repo, repo2)
 }
 
+func Test_isRunBuildRequired_Wildcards(t *testing.T) {
+	buildRequired, err := getHelmDependencyRepos("../../util/helm/testdata/wildcard-dependency")
+	require.NoError(t, err)
+	assert.Equal(t, true, buildRequired)
+}
+
+func Test_isRunBuildRequired_StrictVersion(t *testing.T) {
+	buildRequired, err := getHelmDependencyRepos("../../util/helm/testdata/dependency")
+	require.NoError(t, err)
+	assert.Equal(t, false, buildRequired)
+}
+
 func TestResolveRevision(t *testing.T) {
 	service := newService(t, ".")
 	repo := &v1alpha1.Repository{Repo: "https://github.com/argoproj/argo-cd"}

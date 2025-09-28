@@ -22,6 +22,7 @@ import (
 
 	"github.com/argoproj/argo-cd/v3/util/oci"
 
+	semver "github.com/Masterminds/semver/v3"
 	"github.com/argoproj/gitops-engine/pkg/utils/kube"
 	textutils "github.com/argoproj/gitops-engine/pkg/utils/text"
 	"github.com/argoproj/pkg/v2/sync"
@@ -1097,6 +1098,33 @@ type dependencies struct {
 
 type repositories struct {
 	Repository string `yaml:"repository"`
+	Version    string `yaml:"version"`
+	Name       string `yaml:"name"`
+}
+
+func isRunBuildRequired(appPath string) (bool, error) {
+	// if in Chart.yaml we have wildcard dependencies & we execute `helm template`
+	// without `helm dependency build` it is not correct behavior, because
+	// because in the <appPath>/charts folder helm package can store dependencies with the old version,
+	// but there is already a newer version in the registry
+
+	f, err := os.ReadFile(filepath.Join(appPath, "Chart.yaml"))
+	if err != nil {
+		return false, fmt.Errorf("error reading helm chart from %s: %w", filepath.Join(appPath, "Chart.yaml"), err)
+	}
+
+	d := &dependencies{}
+	if err = yaml.Unmarshal(f, d); err != nil {
+		return false, fmt.Errorf("error unmarshalling the helm chart while getting helm dependency repos: %w", err)
+	}
+
+	for _, r := range d.Dependencies {
+		if _, err := semver.NewVersion(r.Version); err != nil {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func getHelmDependencyRepos(appPath string) ([]*v1alpha1.Repository, error) {
@@ -1300,6 +1328,15 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 	}
 
 	defer h.Dispose()
+
+	helmBuildRequired, err := isRunBuildRequired(appPath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if helmBuildRequired {
+		err = runHelmBuild(appPath, h)
+	}
 
 	out, command, err := h.Template(templateOpts)
 	if err != nil {
