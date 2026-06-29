@@ -22,6 +22,7 @@ import (
 	alpha1 "github.com/argoproj/argo-cd/v3/pkg/client/listers/application/v1alpha1"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-playground/webhooks/v6/azuredevops"
 	"github.com/go-playground/webhooks/v6/bitbucket"
 	bitbucketserver "github.com/go-playground/webhooks/v6/bitbucket-server"
@@ -585,6 +586,83 @@ func getURLRegex(originalURL string, regexpFormat string) (*regexp.Regexp, error
 	return repoRegexp, nil
 }
 
+// resolveRefSourceCommitSHAs builds a map of normalized repo URL → resolved commit SHA for each
+// ref source, using only the cached git references. Entries that cannot be resolved from the cache
+// are omitted so that the resulting manifest key matches the one written by the repo server.
+func resolveRefSourceCommitSHAs(refSources map[string]*v1alpha1.RefTarget, repoCache *cache.Cache) cache.ResolvedRevisions {
+	if len(refSources) == 0 {
+		return nil
+	}
+	result := make(cache.ResolvedRevisions)
+	for _, refTarget := range refSources {
+		if refTarget == nil {
+			continue
+		}
+		normalizedURL := git.NormalizeGitURL(refTarget.Repo.Repo)
+		if normalizedURL == "" {
+			continue
+		}
+		if _, already := result[normalizedURL]; already {
+			continue
+		}
+		targetRevision := refTarget.TargetRevision
+		if git.IsCommitSHA(targetRevision) {
+			result[normalizedURL] = targetRevision
+			continue
+		}
+		var refs []*plumbing.Reference
+		if _, err := repoCache.GetGitReferences(normalizedURL, &refs); err != nil || len(refs) == 0 {
+			log.Debugf("could not resolve ref source %s from cache, skipping", normalizedURL)
+			continue
+		}
+		if sha, err := resolveRevisionFromRefs(targetRevision, refs); err == nil {
+			result[normalizedURL] = sha
+		} else {
+			log.Debugf("could not resolve revision %q for ref source %s from cached refs: %v", targetRevision, normalizedURL, err)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// resolveRevisionFromRefs resolves a symbolic revision (branch, tag, HEAD) to a commit SHA using
+// a pre-fetched list of git references. This mirrors the logic in nativeGitClient.lsRemote but
+// operates on an already-populated slice instead of making a remote call.
+func resolveRevisionFromRefs(revision string, refs []*plumbing.Reference) (string, error) {
+	if revision == "" {
+		revision = "HEAD"
+	}
+	refToHash := make(map[string]string)
+	refToResolve := ""
+	isShortRef := git.IsShortRef(revision)
+	for _, ref := range refs {
+		refName := ref.Name().String()
+		hash := ref.Hash().String()
+		if ref.Type() == plumbing.HashReference {
+			refToHash[refName] = hash
+		}
+		if (isShortRef && ref.Name().Short() == revision) || refName == revision {
+			if ref.Type() == plumbing.HashReference {
+				return hash, nil
+			}
+			if ref.Type() == plumbing.SymbolicReference {
+				refToResolve = ref.Target().String()
+			}
+		}
+	}
+	if refToResolve != "" {
+		if hash, ok := refToHash[refToResolve]; ok {
+			return hash, nil
+		}
+	}
+	if git.IsTruncatedCommitSHA(revision) {
+		return revision, nil
+	}
+	return "", fmt.Errorf("unable to resolve %q to a commit SHA from cached refs", revision)
+}
+
 func (a *ArgoCDWebhookHandler) storePreviouslyCachedManifests(app *v1alpha1.Application, change changeInfo, trackingMethod string, appInstanceLabelKey string, installationID string, source v1alpha1.ApplicationSource) error {
 	destCluster, err := argo.GetDestinationCluster(context.Background(), app.Spec.Destination, a.db)
 	if err != nil {
@@ -630,7 +708,7 @@ func (a *ArgoCDWebhookHandler) storePreviouslyCachedManifests(app *v1alpha1.Appl
 		installationID,
 		sourceIntegrity,
 		&clusterInfo,
-		nil,
+		resolveRefSourceCommitSHAs(refSources, a.repoCache),
 	)
 	cache.LogDebugManifestCacheKeyFields("moving manifests cache", "webhook app revision changed", oldManifestKey)
 

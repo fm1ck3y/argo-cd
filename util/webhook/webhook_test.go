@@ -15,6 +15,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-playground/webhooks/v6/azuredevops"
 
 	bb "github.com/ktrysmt/go-bitbucket"
@@ -1876,5 +1877,188 @@ func TestProcessAppRefresh(t *testing.T) {
 		h.Shutdown()
 
 		assert.Contains(t, hook.LastEntry().Message, "Requested app 'test-app' hydration")
+	})
+}
+
+func TestResolveRevisionFromRefs(t *testing.T) {
+	t.Parallel()
+
+	masterHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tagHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	refs := []*plumbing.Reference{
+		plumbing.NewHashReference("refs/heads/master", plumbing.NewHash(masterHash)),
+		plumbing.NewHashReference("refs/tags/v1.0.0", plumbing.NewHash(tagHash)),
+		plumbing.NewSymbolicReference("HEAD", "refs/heads/master"),
+	}
+
+	tests := []struct {
+		name      string
+		revision  string
+		wantSHA   string
+		wantError bool
+	}{
+		{
+			name:     "resolves branch by short name",
+			revision: "master",
+			wantSHA:  masterHash,
+		},
+		{
+			name:     "resolves branch by full ref name",
+			revision: "refs/heads/master",
+			wantSHA:  masterHash,
+		},
+		{
+			name:     "resolves tag by short name",
+			revision: "v1.0.0",
+			wantSHA:  tagHash,
+		},
+		{
+			name:     "resolves HEAD symbolic reference",
+			revision: "HEAD",
+			wantSHA:  masterHash,
+		},
+		{
+			name:     "empty revision treated as HEAD",
+			revision: "",
+			wantSHA:  masterHash,
+		},
+		{
+			name:      "unknown branch returns error",
+			revision:  "nonexistent-branch",
+			wantError: true,
+		},
+		{
+			name:     "truncated commit SHA is returned as-is",
+			revision: "aaaaaaaaa",
+			wantSHA:  "aaaaaaaaa",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sha, err := resolveRevisionFromRefs(tc.revision, refs)
+			if tc.wantError {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantSHA, sha)
+			}
+		})
+	}
+}
+
+func TestResolveRefSourceCommitSHAs(t *testing.T) {
+	t.Parallel()
+
+	const (
+		refRepoURL    = "https://github.com/org/ref-repo"
+		normalizedURL = "https://github.com/org/ref-repo"
+		branchSHA     = "cccccccccccccccccccccccccccccccccccccccc"
+		commitSHA     = "dddddddddddddddddddddddddddddddddddddddd"
+	)
+
+	newRepoCache := func() *cache.Cache {
+		cacheClient := cacheutil.NewCache(cacheutil.NewInMemoryCache(1 * time.Hour))
+		return cache.NewCache(cacheClient, 1*time.Minute, 1*time.Minute, 10*time.Second)
+	}
+
+	t.Run("returns nil for empty refSources", func(t *testing.T) {
+		t.Parallel()
+		result := resolveRefSourceCommitSHAs(nil, newRepoCache())
+		assert.Nil(t, result)
+
+		result = resolveRefSourceCommitSHAs(map[string]*v1alpha1.RefTarget{}, newRepoCache())
+		assert.Nil(t, result)
+	})
+
+	t.Run("uses commit SHA directly when TargetRevision is already a full SHA", func(t *testing.T) {
+		t.Parallel()
+		refSources := map[string]*v1alpha1.RefTarget{
+			"$values": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: commitSHA,
+			},
+		}
+		result := resolveRefSourceCommitSHAs(refSources, newRepoCache())
+		require.NotNil(t, result)
+		assert.Equal(t, commitSHA, result[normalizedURL])
+	})
+
+	t.Run("resolves branch from cached git references", func(t *testing.T) {
+		t.Parallel()
+		repoCache := newRepoCache()
+		refs := []*plumbing.Reference{
+			plumbing.NewHashReference("refs/heads/main", plumbing.NewHash(branchSHA)),
+		}
+		err := repoCache.SetGitReferences(normalizedURL, refs)
+		require.NoError(t, err)
+
+		refSources := map[string]*v1alpha1.RefTarget{
+			"$values": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: "main",
+			},
+		}
+		result := resolveRefSourceCommitSHAs(refSources, repoCache)
+		require.NotNil(t, result)
+		assert.Equal(t, branchSHA, result[normalizedURL])
+	})
+
+	t.Run("omits entry when git references are not in cache", func(t *testing.T) {
+		t.Parallel()
+		refSources := map[string]*v1alpha1.RefTarget{
+			"$values": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: "main",
+			},
+		}
+		result := resolveRefSourceCommitSHAs(refSources, newRepoCache())
+		assert.Nil(t, result)
+	})
+
+	t.Run("omits entry when revision cannot be resolved from cached refs", func(t *testing.T) {
+		t.Parallel()
+		repoCache := newRepoCache()
+		refs := []*plumbing.Reference{
+			plumbing.NewHashReference("refs/heads/main", plumbing.NewHash(branchSHA)),
+		}
+		err := repoCache.SetGitReferences(normalizedURL, refs)
+		require.NoError(t, err)
+
+		refSources := map[string]*v1alpha1.RefTarget{
+			"$values": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: "nonexistent-branch",
+			},
+		}
+		result := resolveRefSourceCommitSHAs(refSources, repoCache)
+		assert.Nil(t, result)
+	})
+
+	t.Run("deduplicates entries with the same normalized repo URL", func(t *testing.T) {
+		t.Parallel()
+		repoCache := newRepoCache()
+		refs := []*plumbing.Reference{
+			plumbing.NewHashReference("refs/heads/main", plumbing.NewHash(branchSHA)),
+		}
+		err := repoCache.SetGitReferences(normalizedURL, refs)
+		require.NoError(t, err)
+
+		refSources := map[string]*v1alpha1.RefTarget{
+			"$values1": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: "main",
+			},
+			"$values2": {
+				Repo:           v1alpha1.Repository{Repo: refRepoURL},
+				TargetRevision: "main",
+			},
+		}
+		result := resolveRefSourceCommitSHAs(refSources, repoCache)
+		require.NotNil(t, result)
+		assert.Len(t, result, 1)
+		assert.Equal(t, branchSHA, result[normalizedURL])
 	})
 }
