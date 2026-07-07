@@ -496,8 +496,33 @@ func (a *ArgoCDWebhookHandler) HandleEvent(payload any) {
 			// iterate over all sources and check if any files specified in refresh paths have changed
 			for _, source := range sources {
 				if sourceRevisionHasChanged(source, revision, touchedHead) && sourceUsesURL(source, webURL, repoRegexp) {
+					shouldRefreshed := false
+
 					refreshPaths := path.GetSourceRefreshPaths(&app, source)
 					if path.AppFilesHaveChanged(refreshPaths, changedFiles) {
+						// refresh paths have changed, so we need to refresh the app
+						shouldRefreshed = true
+					} else if change.shaBefore != "" && change.shaAfter != "" && !cacheWarmDisabled {
+						// update the cached manifests with the new revision cache key
+						if err := a.storePreviouslyCachedManifests(&app, change, trackingMethod, appInstanceLabelKey, installationID, source); err != nil {
+							// refresh the app required because store cached manifests unsuccessfully
+							if app.Spec.SourceHydrator != nil {
+								syncSource := app.Spec.SourceHydrator.GetSyncSource()
+								if !(&source).Equals(&syncSource) {
+									shouldRefreshed = true
+								}
+							} else {
+								shouldRefreshed = true
+							}
+
+							log.Infof("Failed to store cached manifests of previous revision for app '%s': %v", app.Name, err)
+							webhookStoreCacheAttemptsTotal.WithLabelValues(git.NormalizeGitURL(webURL), "false").Inc()
+						} else {
+							webhookStoreCacheAttemptsTotal.WithLabelValues(git.NormalizeGitURL(webURL), "true").Inc()
+						}
+					}
+
+					if shouldRefreshed {
 						var hydrateType *v1alpha1.HydrateType
 						if app.Spec.SourceHydrator != nil {
 							drySource := app.Spec.SourceHydrator.GetDrySource()
@@ -507,17 +532,18 @@ func (a *ArgoCDWebhookHandler) HandleEvent(payload any) {
 							}
 						}
 
-						// refresh paths have changed, so we need to refresh the app
-						log.Infof("refreshing app '%s' from webhook", app.Name)
-						if hydrateType != nil {
-							log.Infof("webhook trigger refresh app to hydrate '%s'", app.Name)
-						}
-						appCount++
 						req := &appRefreshRequest{
 							appName:      app.Name,
 							appNamespace: app.Namespace,
 							hydrateType:  hydrateType,
 						}
+
+						log.Infof("refreshing app '%s' from webhook", app.Name)
+						if hydrateType != nil {
+							log.Infof("webhook trigger refresh app to hydrate '%s'", app.Name)
+						}
+
+						appCount++
 						// Apply jitter only if more than threshold apps are affected
 						if appCount > a.webhookRefreshJitterThreshold && a.webhookRefreshJitter != 0 {
 							jitter := time.Duration(float64(a.webhookRefreshJitter) * rand.Float64())
@@ -526,14 +552,6 @@ func (a *ArgoCDWebhookHandler) HandleEvent(payload any) {
 							a.refreshQueue.Add(req)
 						}
 						break // we don't need to check other sources
-					} else if change.shaBefore != "" && change.shaAfter != "" && !cacheWarmDisabled {
-						// update the cached manifests with the new revision cache key
-						if err := a.storePreviouslyCachedManifests(&app, change, trackingMethod, appInstanceLabelKey, installationID, source); err != nil {
-							log.Debugf("Failed to store cached manifests of previous revision for app '%s': %v", app.Name, err)
-							webhookStoreCacheAttemptsTotal.WithLabelValues(git.NormalizeGitURL(webURL), "false").Inc()
-						} else {
-							webhookStoreCacheAttemptsTotal.WithLabelValues(git.NormalizeGitURL(webURL), "true").Inc()
-						}
 					}
 				}
 			}

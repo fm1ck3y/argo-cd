@@ -1078,6 +1078,38 @@ func TestHandleEvent(t *testing.T) {
 			hasHydrate:  false,
 			updateCache: true,
 		},
+		{
+			name: "storePreviouslyCachedManifests has error for refSources",
+			app: &v1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-app",
+					Namespace: "argocd",
+					Annotations: map[string]string{
+						"argocd.argoproj.io/manifest-generate-paths": "values",
+					},
+				},
+				Spec: v1alpha1.ApplicationSpec{
+					Sources: v1alpha1.ApplicationSources{
+						{
+							RepoURL:        "https://github.com/jessesuen/test-repo",
+							TargetRevision: "HEAD",
+							Helm: &v1alpha1.ApplicationSourceHelm{
+								ValueFiles: []string{"$myref/values/test.yaml"},
+							},
+						},
+						{
+							RepoURL:        "https://github.com/jessesuen/test-repo",
+							TargetRevision: "HEAD",
+							Ref:            "myref",
+						},
+					},
+				},
+			},
+			changedFile: "values/test.yaml",
+			hasRefresh:  true,
+			hasHydrate:  false,
+			updateCache: false,
+		},
 	}
 
 	for _, tt := range tests {
